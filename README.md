@@ -4,9 +4,9 @@ interval analysis by abstract interpretation on a simple language.
 ### language
 * assignment
 * arithmetic limited to addition and subtraction 
-* assume *b* where *b* is an equality comparison between variables and variable and constants
-* nondeterministic choice S1[]S2
-* sequencing S1;S2
+* assume *Cond* where *Cond* is an equality comparison between variables and variable and constants
+* nondeterministic choice *Cmd1*[]*Cmd2*
+* sequencing *Cmd1*;*Cmd2*
 
 ### todo
 * fix while
