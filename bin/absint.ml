@@ -1,43 +1,9 @@
 open Base
-open Interval
 open Bigint
+open Interval
+open Memory
 open Syntax
 open Util
-
-module Memory : sig
-  type t = (var, Interval.t) Hashtbl.t
-
-  val ( == ) : t -> t -> bool
-  val ( <> ) : t -> t -> bool
-  val join : t -> t -> t
-end = struct
-  type t = (var, Interval.t) Hashtbl.t
-
-  let is_subset t1 t2 =
-    Hashtbl.fold
-      ~init:true
-      ~f:(fun ~key:var ~data:interval1 bool_acc ->
-        let interval2 = Option.value (Hashtbl.find t2 var) ~default:None in
-        Interval.is_subset interval1 interval2 && bool_acc)
-      t1
-  ;;
-
-  let ( == ) t1 t2 = is_subset t1 t2 && is_subset t2 t1
-  let ( <> ) t1 t2 = not (t1 == t2)
-
-  let join t1 t2 =
-    Hashtbl.fold
-      ~init:t1
-      ~f:(fun ~key:variable ~data:interval acc ->
-        match Hashtbl.find t1 variable with
-        | None -> acc
-        | Some interval' ->
-          let interval'' = Interval.join interval interval' in
-          let _ = Hashtbl.set acc ~key:variable ~data:interval'' in
-          acc)
-      t2
-  ;;
-end
 
 module Absint : sig
   val absint_expression : expr -> Memory.t -> Interval.t
@@ -45,7 +11,7 @@ module Absint : sig
   val absint_iter : prog -> Memory.t -> (label, (var, Interval.t) Hashtbl.t) Hashtbl.t
 
   val absint_iter_loop
-    :  label Base.Stack.t
+    :  label Stack.t
     -> (label, Memory.t) Hashtbl.t
     -> cmd
     -> label
@@ -58,27 +24,23 @@ end = struct
       (match Hashtbl.find memory x with
        | Some x -> x
        | None -> failwith "todo, none or [-inf, inf]")
-    | Binop (operation, left_expression, right_expression) ->
-      (match operation with
+    | Binop (op, left_expr, right_expr) ->
+      (match op with
        | Add ->
          Interval.( + )
-           (absint_expression left_expression memory)
-           (absint_expression right_expression memory)
+           (absint_expression left_expr memory)
+           (absint_expression right_expr memory)
        | Sub ->
          Interval.( - )
-           (absint_expression right_expression memory)
-           (absint_expression right_expression memory))
+           (absint_expression right_expr memory)
+           (absint_expression right_expr memory))
   ;;
 
-  let absint_condition
-    (Cmp (compare_operation, left_expression, right_expression))
-    (memory : Memory.t)
-    : Interval.t
-    =
-    match left_expression with
+  let absint_condition (Cmp (cmp_op, left_expr, right_expr)) memory =
+    match left_expr with
     | Var x ->
-      let right_interval = absint_expression right_expression memory in
-      (match compare_operation with
+      let right_interval = absint_expression right_expr memory in
+      (match cmp_op with
        | Less ->
          (* if right interval is [4,11] modified will be [-inf, 10] -- to generalize [a,b] -> [-inf, b-1]*)
          let modified_right_interval =
@@ -105,67 +67,62 @@ end = struct
     | _ -> failwith "we only ac(opium)cept variables on left and expressions on right"
   ;;
 
-  let rec absint_command currCmd glblState nextLabel =
-    match currCmd with
-    | Seq (_, cmd1, cmd2) -> absint_command cmd1 glblState (Util.find_label cmd2)
+  let rec absint_command command global next_label =
+    match command with
+    | Seq (_, cmd1, cmd2) -> absint_command cmd1 global (Util.find_label cmd2)
     | While (while_label, cond, cmd) ->
-      let curMem =
-        match Hashtbl.find glblState while_label with
-        | None -> Hashtbl.create (module String)
-        | Some mem -> Hashtbl.copy mem
+      let current_memory =
+        Hashtbl.find global while_label
+        |> Option.value ~default:(Hashtbl.create (module String))
+        |> Hashtbl.copy
       in
-      let cond_interval = absint_condition cond curMem in
+      let cond_interval = absint_condition cond current_memory in
       let label = Util.find_label cmd in
       let var =
         match cond with
         | Cmp (_, Var x, _) -> x
-        | _ ->
-          failwith
-            "No variable in Condition expression. public static void assume \
-             absint_command failure."
+        | _ -> failwith "No variable in Condition expression in absint_command."
       in
-      let var_interval = Option.value (Hashtbl.find curMem var) ~default:None in
+      let var_interval = Option.value (Hashtbl.find current_memory var) ~default:None in
       let meet_interval1 = Interval.meet cond_interval var_interval in
       let meet_interval2 = Interval.meet (Interval.not cond_interval) var_interval in
       List.fold
-        [ label, meet_interval1; nextLabel, meet_interval2 ]
+        [ label, meet_interval1; next_label, meet_interval2 ]
         ~init:[]
         ~f:(fun acc (lbl, meet) ->
-          let curMemPrime = Hashtbl.copy curMem in
-          let _ = Hashtbl.set curMemPrime ~key:var ~data:meet in
-          let nextMem =
-            Option.value
-              (Hashtbl.find glblState lbl)
-              ~default:(Hashtbl.create (module String))
+          let current_memory_prime = Hashtbl.copy current_memory in
+          let _ = Hashtbl.set current_memory_prime ~key:var ~data:meet in
+          let next_memory =
+            Hashtbl.find global lbl
+            |> Option.value ~default:(Hashtbl.create (module String))
           in
-          if Memory.( <> ) curMemPrime nextMem
+          if Memory.( <> ) current_memory_prime next_memory
           then (
-            let joinMem = Memory.join curMemPrime nextMem in
-            let _ = Hashtbl.set glblState ~key:lbl ~data:joinMem in
+            let joined_memory = Memory.join current_memory_prime next_memory in
+            let _ = Hashtbl.set global ~key:lbl ~data:joined_memory in
             lbl :: acc)
-          else if Hashtbl.is_empty curMemPrime && Hashtbl.is_empty nextMem
+          else if Hashtbl.is_empty current_memory_prime && Hashtbl.is_empty next_memory
           then lbl :: acc
-          else acc) 
+          else acc)
     | Choice (lbl, cmd1, cmd2) ->
-      let curMem =
-        match Hashtbl.find glblState lbl with
-        | None -> Hashtbl.create (module String)
-        | Some mem -> Hashtbl.copy mem
+      let current_memory =
+        Hashtbl.find global lbl
+        |> Option.value ~default:(Hashtbl.create (module String))
+        |> Hashtbl.copy
       in
       let label1 = Util.find_label cmd1 in
       let label2 = Util.find_label cmd2 in
       List.fold [ label1; label2 ] ~init:[] ~f:(fun acc label ->
-        let nextMem =
-          Option.value
-            (Hashtbl.find glblState label)
-            ~default:(Hashtbl.create (module String))
+        let next_memory =
+          Hashtbl.find global label
+          |> Option.value ~default:(Hashtbl.create (module String))
         in
-        if Memory.( <> ) curMem nextMem
+        if Memory.( <> ) current_memory next_memory
         then (
-          let joinMem = Memory.join curMem nextMem in
-          let _ = Hashtbl.set glblState ~key:label ~data:joinMem in
+          let joined_memory = Memory.join current_memory next_memory in
+          let _ = Hashtbl.set global ~key:label ~data:joined_memory in
           label :: acc)
-        else if Hashtbl.is_empty curMem && Hashtbl.is_empty nextMem
+        else if Hashtbl.is_empty current_memory && Hashtbl.is_empty next_memory
         then label :: acc
         else acc)
     | Assume (lbl, cond) ->
@@ -177,73 +134,66 @@ end = struct
             "No variable in Condition expression. public static void assume \
              absint_command failure."
       in
-      let curMem =
-        match Hashtbl.find glblState lbl with
-        | None -> Hashtbl.create (module String)
-        | Some mem -> Hashtbl.copy mem
+      let current_memory =
+        Hashtbl.find global lbl
+        |> Option.value ~default:(Hashtbl.create (module String))
+        |> Hashtbl.copy
       in
-      let cond_eval = absint_condition cond curMem in
-      let _ = Hashtbl.set curMem ~key:v ~data:cond_eval in
-      let nextMem =
-        Option.value
-          (Hashtbl.find glblState nextLabel)
-          ~default:(Hashtbl.create (module String))
+      let cond_eval = absint_condition cond current_memory in
+      let _ = Hashtbl.set current_memory ~key:v ~data:cond_eval in
+      let next_memory =
+        Hashtbl.find global next_label
+        |> Option.value ~default:(Hashtbl.create (module String))
       in
-      if Memory.( <> ) curMem nextMem
+      if Memory.( <> ) current_memory next_memory
       then (
-        let joinMem = Memory.join curMem nextMem in
-        Hashtbl.set glblState ~key:nextLabel ~data:joinMem;
-        [ nextLabel ])
+        let joined_memory = Memory.join current_memory next_memory in
+        Hashtbl.set global ~key:next_label ~data:joined_memory;
+        [ next_label ])
       else []
     | Assign (lbl, var, exp) ->
-      let curMem =
-        match Hashtbl.find glblState lbl with
-        | None -> Hashtbl.create (module String)
-        | Some mem -> Hashtbl.copy mem
+      let current_memory =
+        Hashtbl.find global lbl
+        |> Option.value ~default:(Hashtbl.create (module String))
+        |> Hashtbl.copy
       in
-      let oldBint = Option.value (Hashtbl.find curMem var) ~default:None in
-      let newBint = absint_expression exp curMem in
-      let joinBint = Interval.join oldBint newBint in
-      let _ = Hashtbl.set curMem ~key:var ~data:joinBint in
-      let nextMem =
-        Option.value
-          (Hashtbl.find glblState nextLabel)
-          ~default:(Hashtbl.create (module String))
+      let old_interval = Option.value (Hashtbl.find current_memory var) ~default:None in
+      let new_interval = absint_expression exp current_memory in
+      let join_interval = Interval.join old_interval new_interval in
+      let _ = Hashtbl.set current_memory ~key:var ~data:join_interval in
+      let next_memory =
+        Hashtbl.find global next_label
+        |> Option.value ~default:(Hashtbl.create (module String))
       in
-      if Memory.( <> ) curMem nextMem
+      if Memory.( <> ) current_memory next_memory
       then (
-        let joinMem = Memory.join curMem nextMem in
-        Hashtbl.set glblState ~key:nextLabel ~data:joinMem;
-        [ nextLabel ])
+        let joined_memory = Memory.join current_memory next_memory in
+        Hashtbl.set global ~key:next_label ~data:joined_memory;
+        [ next_label ])
       else []
   ;;
 
-  let rec absint_iter_loop
-    (stack : label Stack.t)
-    (global : (label, Memory.t) Hashtbl.t)
-    (constProg : cmd)
-    (lExit : label)
-    =
-    if Stack.is_empty stack
+  let rec absint_iter_loop worklist global command exit_label =
+    if Stack.is_empty worklist
     then global
     else (
-      let label = Stack.pop_exn stack in
-      match Util.find_command constProg label with
-      | None -> absint_iter_loop stack global constProg lExit
+      let label = Stack.pop_exn worklist in
+      match Util.find_command command label with
+      | None -> absint_iter_loop worklist global command exit_label
       | Some command ->
-        (match Util.find_next_label constProg label lExit with
-         | None -> failwith "find_next_label err in absint_iterLoop"
+        (match Util.find_next_label command label exit_label with
+         | None -> failwith "find_next_label err in absint_iter_loop"
          | Some nextLabel ->
            let labels = absint_command command global nextLabel in
-           let _ = List.map labels ~f:(fun x -> Stack.push stack x) in
-           absint_iter_loop stack global constProg lExit))
+           let _ = List.map labels ~f:(fun x -> Stack.push worklist x) in
+           absint_iter_loop worklist global command exit_label))
   ;;
 
-  let absint_iter (Prog (command, label)) initial_memory =
-    let init_label = Util.find_label command in
+  let absint_iter (Prog (init_command, label)) initial_memory =
+    let init_label = Util.find_label init_command in
     let worklist = Base.Stack.of_list [ init_label ] in
     let global = Hashtbl.create (module Int) in
     let _ = Hashtbl.set global ~key:init_label ~data:initial_memory in
-    absint_iter_loop worklist global command label
+    absint_iter_loop worklist global init_command label
   ;;
 end
