@@ -1,7 +1,7 @@
 # absint
 interval analysis by abstract interpretation on a simple language.
 
-### language
+### specs
 * assignment
 * arithmetic limited to addition and subtraction 
 * assume *Cond* where *Cond* is an equality comparison between variables and variable and constants
